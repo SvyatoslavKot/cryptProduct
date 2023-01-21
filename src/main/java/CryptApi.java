@@ -1,58 +1,169 @@
-import jdk.nashorn.api.scripting.ScriptObjectMirror;
+
+import org.apache.hc.client5.http.ConnectTimeoutException;
 import org.apache.hc.client5.http.classic.HttpClient;
+import org.apache.hc.client5.http.classic.methods.ClassicHttpRequests;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
 import org.apache.hc.client5.http.entity.EntityBuilder;
+import org.apache.hc.client5.http.impl.classic.BasicHttpClientResponseHandler;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.core5.http.ContentType;
-import org.apache.hc.core5.http.HttpEntity;
-import org.apache.hc.core5.http.HttpRequest;
-import org.apache.hc.core5.http.HttpResponse;
+import org.apache.hc.core5.http.*;
+import org.apache.hc.core5.http.io.HttpClientResponseHandler;
 import org.apache.hc.core5.http.io.entity.EntityTemplate;
 import org.apache.hc.core5.http.message.HttpResponseWrapper;
 import org.apache.hc.core5.http.protocol.RequestHandlerRegistry;
 import org.json.JSONObject;
 
-import javax.naming.InitialContext;
-import javax.naming.NamingException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.text.DateFormat;
-import java.util.Base64;
-import java.util.List;
-import java.util.Objects;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.*;
 
 public class CryptApi {
-    public static void main(String[] args) throws NamingException {
-        CryptApi cryptApi = new CryptApi();
-        InitialContext context = new InitialContext();
+    public static void main(String[] args) {
+        CryptApi cryptApi = new CryptApi(10000, 2);
+    }
+
+    volatile private int counter;
+    private int maxCounter;
+    private int period;
+    private  DocumentService documentService = new DocumentService();
+
+    private ScheduledExecutorService executors = Executors.newScheduledThreadPool(10);
+
+    public CryptApi ( int period_ms, int requestLimit) {
+        this.counter = 0;
+        this.maxCounter = requestLimit;
+        this.period = period_ms;
+
+        executors.scheduleAtFixedRate(new Runnable() {
+            @Override
+            public void run() {
+                System.out.println("Upload counter, counter -> " + counter);
+                counter =  0;
+            }
+        },0, period, TimeUnit.MILLISECONDS);
+    }
+
+    private void job(){
+        SimpleDateFormat simpleDateFormat = new SimpleDateFormat("dd.mm.yyyy");
+        Date date = new Date();
+
+        ProductMadeInRussia p = new ProductMadeInRussia("CertificateDoc", "CertificateDate", "CertificateNum", "Owner_inn", "Produce_inn",date,"tnved_code", "uid_Cod","uiti_code");
+        ProductDocument productDocumentMadeInRus = new ProductDocumentMadeInRus(new Description("participantinn"), "Doc_Status", DocumentType.LP_INTRODUCE_GOODS,true,"owner_inn", "participantInn", "Producer_inn",date, "Product_type",List.of(p),date, "reg_num" );
+
+        System.out.println(productDocumentMadeInRus);
+
+        produceCryptAPI(productDocumentMadeInRus,"Signature", ProductGroup.MILK);
+        produceCryptAPI(productDocumentMadeInRus,"Signature", ProductGroup.MILK);
+        produceCryptAPI(productDocumentMadeInRus,"Signature", ProductGroup.MILK);
+
+        CloseableHttpClient cl = HttpClients.createDefault();
+        HttpGet hp = new HttpGet("https://ismp.crpt.ru/api/v3/auth/cert/key");
+
+        try {
+            HttpRequest request = ClassicHttpRequests.create(Method.GET,"https://ismp.crpt.ru/api/v3/auth/cert/key");
+            HttpClientResponseHandler<String> handler = new BasicHttpClientResponseHandler();
+            HttpResponse response =  cl.execute(hp);
+            JSONObject js = new JSONObject(handler.handleResponse((ClassicHttpResponse) response));
+            System.out.println(js.get("uuid"));
+
+            System.out.println(response);
+            System.out.println(response.getReasonPhrase());
+            System.out.println(response.getLocale());
+        } catch (ConnectionRequestTimeoutException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+            System.out.println(e.getMessage());
+        } catch (HttpException e) {
+            e.printStackTrace();
+        }
 
     }
 
-    class HttpClient {
-        private CloseableHttpClient httpClient = HttpClients.createDefault();
-        private String url = "https://ismp.crpt.ru/api/v3/lk/documents/create";
-        private String token = "token";
+    public synchronized void produceCryptAPI (ProductDocument productDocument, String signature, ProductGroup prGroup) {
+                try{
+                    while (counter >= maxCounter){
+                        wait(period);
+                    }
+                    documentService.createDocumentRequest(productDocument, signature, prGroup);
+                    counter++;
+                }catch (InterruptedException e) {
+                    executors.shutdown();
+                    e.printStackTrace();
+                } catch (HttpException e) {
+                    e.printStackTrace();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+                finally {
+                    executors.shutdownNow();
+                }
+    }
 
-        public void createDocument(ProductDocument productDocument, String signature, ProductGroup prGroup ) throws IOException {
-            Data sendData = new Data(productDocument, prGroup, signature );
+
+    class DocumentService {
+        private Client httpClient = new HttpClient();
+
+        public synchronized void  createDocumentRequest (ProductDocument productDocument, String signature, ProductGroup prGroup) throws HttpException, IOException {
+            String url = "/lk/documents/create?pg=" + prGroup.getName();
+            Data sendData = new Data(productDocument, prGroup, signature);
+            HttpClientResponseHandler<String> handler = new BasicHttpClientResponseHandler();
 
             JSONObject jsonObject = new JSONObject(sendData);
 
             HttpEntity httpEntity = EntityBuilder.create()
                     .setContentType(ContentType.APPLICATION_JSON)
                     .setText(jsonObject.toString()).build();
+            HttpResponse response = httpClient.produceCryptAPI(url, httpEntity);
+            System.out.println(response.getLocale());
+            if (response.getCode() == 200) {
+                System.out.println(handler.handleResponse((ClassicHttpResponse) response));
+                JSONObject js = new JSONObject(handler.handleResponse((ClassicHttpResponse) response));
+                var value = js.get("value");
+                System.out.println("Successfully  value -> " + value);
+            }
+            if (response.getCode() == 401) {
+                System.out.println("Status code 401 XML-format");
+            }
+            else {
+                JSONObject js = new JSONObject(handler.handleResponse((ClassicHttpResponse) response));
+                var errorMessage =  js.get("error_message");
+                System.out.println(errorMessage);
+            }
+        }
+    }
 
-            HttpPost httpPost = new HttpPost(url + "?pg=" + prGroup);
+    interface Client {
+        HttpResponse produceCryptAPI (String url, HttpEntity httpEntity);
+    }
+    class HttpClient implements Client {
+        private CloseableHttpClient httpClient = HttpClients.createDefault();
+        private String url = "https://ismp.crpt.ru/api/v3";
+        private String token = "token";
+
+
+
+        @Override
+        public HttpResponse produceCryptAPI (String urlPostfix, HttpEntity httpEntity) {
+            HttpPost httpPost = new HttpPost(url + urlPostfix);
             httpPost.setHeader("Authorization", "Bearer " + token);
             httpPost.setEntity(httpEntity);
-
-            HttpResponse response = httpClient.execute(httpPost);
-
-            System.out.println(response.getCode());
-
+            try {
+                return httpClient.execute(httpPost);
+            } catch (ConnectionRequestTimeoutException e) {
+                e.printStackTrace();
+                return null;
+            } catch (IOException e) {
+                e.printStackTrace();
+                System.out.println(e.getMessage());
+                return null;
+            }
         }
-
     }
 
      class Data {
@@ -66,12 +177,12 @@ public class CryptApi {
          public Data() {
          }
 
-         public Data( ProductDocument productDocument, ProductGroup product_group, String signature) {
-             this.document_format = productDocument.getDocumentType().getDocumentFormat();
-             this.product_document = encoder.encodeToString(product_document.getBytes());
+         public Data (ProductDocument productDoc, ProductGroup product_group, String signature) {
+             this.document_format = productDoc.getDocumentType().getDocumentFormat();
+             this.product_document = encoder.encodeToString(new JSONObject(productDoc).toString().getBytes());
              this.product_group = product_group;
              this.signature = signature;
-             this.documentType = productDocument.getDocumentType();
+             this.documentType = productDoc.getDocumentType();
          }
 
          @Override
@@ -84,7 +195,6 @@ public class CryptApi {
                      ", type=" + documentType +
                      '}';
          }
-
          @Override
          public boolean equals(Object o) {
              if (this == o) return true;
@@ -92,7 +202,6 @@ public class CryptApi {
              Data data = (Data) o;
              return document_format == data.document_format && Objects.equals(product_document, data.product_document) && product_group == data.product_group && Objects.equals(signature, data.signature) && documentType == data.documentType;
          }
-
          @Override
          public int hashCode() {
              return Objects.hash(document_format, product_document, product_group, signature, documentType);
@@ -180,16 +289,16 @@ public class CryptApi {
         private String owner_inn;
         private String participant_inn;
         private String producer_inn;
-        private DateFormat production_date;
+        private Date production_date;
         private String production_type;
         private List<ProductMadeInRussia> products;
-        private DateFormat reg_date;
+        private Date reg_date;
         private String reg_number;
 
          public ProductDocumentMadeInRus() {
          }
 
-         public ProductDocumentMadeInRus(Description description, String doc_status, DocumentType documentType, boolean importRequest, String owner_inn, String participant_inn, String producer_inn, DateFormat production_date, String production_type, List<ProductMadeInRussia> products, DateFormat reg_date, String reg_number) {
+         public ProductDocumentMadeInRus(Description description, String doc_status, DocumentType documentType, boolean importRequest, String owner_inn, String participant_inn, String producer_inn, Date production_date, String production_type, List<ProductMadeInRussia> products, Date reg_date, String reg_number) {
              this.description = description;
              this.doc_status = doc_status;
              super.documentType = documentType;
@@ -269,14 +378,14 @@ public class CryptApi {
         private String certificate_document_number;
         private String owner_inn;
         private String producer_inn;
-        private DateFormat production_date;
+        private Date production_date;
         private String tnved_code;
         private String uid_code;
         private String uitu_code;
 
          public ProductMadeInRussia() {
          }
-         public ProductMadeInRussia(String certificate_document, String certificate_document_date, String certificate_document_number, String owner_inn, String producer_inn, DateFormat production_date, String tnved_code, String uid_code, String uitu_code) {
+         public ProductMadeInRussia(String certificate_document, String certificate_document_date, String certificate_document_number, String owner_inn, String producer_inn, Date production_date, String tnved_code, String uid_code, String uitu_code) {
              this.certificate_document = certificate_document;
              this.certificate_document_date = certificate_document_date;
              this.certificate_document_number = certificate_document_number;
@@ -314,10 +423,6 @@ public class CryptApi {
                      '}';
          }
      }
-
-
-
-
 }
 
 
