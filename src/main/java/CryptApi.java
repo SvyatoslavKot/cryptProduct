@@ -1,37 +1,23 @@
 
-import org.apache.hc.client5.http.ConnectTimeoutException;
-import org.apache.hc.client5.http.classic.HttpClient;
-import org.apache.hc.client5.http.classic.methods.ClassicHttpRequests;
-import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.entity.EntityBuilder;
 import org.apache.hc.client5.http.impl.classic.BasicHttpClientResponseHandler;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.core5.http.*;
 import org.apache.hc.core5.http.io.HttpClientResponseHandler;
-import org.apache.hc.core5.http.io.entity.EntityTemplate;
-import org.apache.hc.core5.http.message.HttpResponseWrapper;
-import org.apache.hc.core5.http.protocol.RequestHandlerRegistry;
+import org.apache.hc.core5.util.Timeout;
 import org.json.JSONObject;
-
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
 
 public class CryptApi {
-    public static void main(String[] args) {
-        CryptApi cryptApi = new CryptApi(10000, 2);
-    }
-
     volatile private int counter;
     private int maxCounter;
     private int period;
-    private  DocumentService documentService = new DocumentService();
-
+    private final DocumentService documentService = new DocumentService();
     private ScheduledExecutorService executors = Executors.newScheduledThreadPool(10);
 
     public CryptApi ( int period_ms, int requestLimit) {
@@ -42,75 +28,40 @@ public class CryptApi {
         executors.scheduleAtFixedRate(new Runnable() {
             @Override
             public void run() {
+                counter =  1;
                 System.out.println("Upload counter, counter -> " + counter);
-                counter =  0;
+                synchronized (documentService){
+                    documentService.notifyAll();
+                }
             }
         },0, period, TimeUnit.MILLISECONDS);
     }
 
-    private void job(){
-        SimpleDateFormat simpleDateFormat = new SimpleDateFormat("dd.mm.yyyy");
-        Date date = new Date();
 
-        ProductMadeInRussia p = new ProductMadeInRussia("CertificateDoc", "CertificateDate", "CertificateNum", "Owner_inn", "Produce_inn",date,"tnved_code", "uid_Cod","uiti_code");
-        ProductDocument productDocumentMadeInRus = new ProductDocumentMadeInRus(new Description("participantinn"), "Doc_Status", DocumentType.LP_INTRODUCE_GOODS,true,"owner_inn", "participantInn", "Producer_inn",date, "Product_type",List.of(p),date, "reg_num" );
-
-        System.out.println(productDocumentMadeInRus);
-
-        produceCryptAPI(productDocumentMadeInRus,"Signature", ProductGroup.MILK);
-        produceCryptAPI(productDocumentMadeInRus,"Signature", ProductGroup.MILK);
-        produceCryptAPI(productDocumentMadeInRus,"Signature", ProductGroup.MILK);
-
-        CloseableHttpClient cl = HttpClients.createDefault();
-        HttpGet hp = new HttpGet("https://ismp.crpt.ru/api/v3/auth/cert/key");
-
-        try {
-            HttpRequest request = ClassicHttpRequests.create(Method.GET,"https://ismp.crpt.ru/api/v3/auth/cert/key");
-            HttpClientResponseHandler<String> handler = new BasicHttpClientResponseHandler();
-            HttpResponse response =  cl.execute(hp);
-            JSONObject js = new JSONObject(handler.handleResponse((ClassicHttpResponse) response));
-            System.out.println(js.get("uuid"));
-
-            System.out.println(response);
-            System.out.println(response.getReasonPhrase());
-            System.out.println(response.getLocale());
-        } catch (ConnectionRequestTimeoutException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-            System.out.println(e.getMessage());
-        } catch (HttpException e) {
-            e.printStackTrace();
-        }
-
-    }
-
-    public synchronized void produceCryptAPI (ProductDocument productDocument, String signature, ProductGroup prGroup) {
+    public void produceCryptAPI (ProductDocument productDocument, String signature, ProductGroup prGroup) {
                 try{
-                    while (counter >= maxCounter){
-                        wait(period);
+                    while (counter > maxCounter){
+                       synchronized (documentService) {
+                           documentService.wait();
+                       }
                     }
                     documentService.createDocumentRequest(productDocument, signature, prGroup);
                     counter++;
-                }catch (InterruptedException e) {
-                    executors.shutdown();
-                    e.printStackTrace();
-                } catch (HttpException e) {
+                }catch (HttpException e) {
                     e.printStackTrace();
                 } catch (IOException e) {
                     e.printStackTrace();
-                }
-                finally {
-                    executors.shutdownNow();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
                 }
     }
 
-
-    class DocumentService {
+   class  DocumentService {
         private Client httpClient = new HttpClient();
+        private final String URL_DOCUMENT_CREATE = "/lk/documents/create?pg=";
 
-        public synchronized void  createDocumentRequest (ProductDocument productDocument, String signature, ProductGroup prGroup) throws HttpException, IOException {
-            String url = "/lk/documents/create?pg=" + prGroup.getName();
+        public synchronized  void  createDocumentRequest (ProductDocument productDocument, String signature, ProductGroup prGroup) throws HttpException, IOException {
+            String url = URL_DOCUMENT_CREATE + prGroup.getName();
             Data sendData = new Data(productDocument, prGroup, signature);
             HttpClientResponseHandler<String> handler = new BasicHttpClientResponseHandler();
 
@@ -141,22 +92,22 @@ public class CryptApi {
     interface Client {
         HttpResponse produceCryptAPI (String url, HttpEntity httpEntity);
     }
+
     class HttpClient implements Client {
         private CloseableHttpClient httpClient = HttpClients.createDefault();
-        private String url = "https://ismp.crpt.ru/api/v3";
+        private final String API_URL = "https://ismp.crpt.ru/api/v3";
         private String token = "token";
-
-
 
         @Override
         public HttpResponse produceCryptAPI (String urlPostfix, HttpEntity httpEntity) {
-            HttpPost httpPost = new HttpPost(url + urlPostfix);
+            HttpPost httpPost = new HttpPost(API_URL + urlPostfix);
+            httpPost.setConfig(RequestConfig.custom().setConnectionRequestTimeout(Timeout.ofMilliseconds(5000)).build());
             httpPost.setHeader("Authorization", "Bearer " + token);
             httpPost.setEntity(httpEntity);
             try {
                 return httpClient.execute(httpPost);
             } catch (ConnectionRequestTimeoutException e) {
-                e.printStackTrace();
+                System.out.println("Время ожидание ответа превышено. "   + e.getMessage());
                 return null;
             } catch (IOException e) {
                 e.printStackTrace();
@@ -349,7 +300,7 @@ public class CryptApi {
                      '}';
          }
      }
-    class Description {
+     class Description {
         private String participantInn;
 
         public String getParticipantInn() {
